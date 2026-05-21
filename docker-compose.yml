@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "${VECTOR_PORT}"
+    volumes:
+      - llm-data:/var/lib/postgresql/data
+
+volumes:
+  llm-data:
