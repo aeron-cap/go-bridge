@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/exec"
 	"strings"
 	"syscall"
 
@@ -23,6 +24,8 @@ var AppConfig struct {
 	DiscordBotToken string
 	SearxngURL      string
 	ModelVersion    string
+	AllowedPaths	string
+	AllowedCommands	string
 }
 
 func init() {
@@ -34,11 +37,39 @@ func init() {
 	AppConfig.DiscordBotToken = os.Getenv("DISCORD_BOT_TOKEN")
 	AppConfig.SearxngURL = os.Getenv("SEARXNG_BASE_URL")
 	AppConfig.ModelVersion = os.Getenv("MODEL_VERSION")
+	// comma separated
+	AppConfig.AllowedPaths = os.Getenv("ALLOWED_PATHS")
+	AppConfig.AllowedCommands = os.Getenv("ALLOWED_COMMANDS")
+}
+
+type ToolProperties map[string]interface{}
+
+type ToolParameters struct {
+	Type       string         `json:"type"`
+	Properties ToolProperties `json:"properties"`
+	Required   []string       `json:"required"`
+}
+
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  ToolParameters `json:"parameters"`
+}
+
+type Tools struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	ToolCalls []struct {
+		Function struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		} `json:"function,omitempty"`
+	} `json:"tool_calls,omitempty"`
 }
 
 type OllamaChatRequest struct {
@@ -46,13 +77,11 @@ type OllamaChatRequest struct {
 	Messages  []Message `json:"messages"`
 	Stream    bool      `json:"stream"`
 	KeepAlive string    `json:"keep_alive"`
+	Tools     []Tools   `json:"tools,omitempty"`
 }
 
 type OllamaChatResponse struct {
-	Message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"message"`
+	Message Message `json:"message"`
 }
 
 type StartingPrompt struct {
@@ -61,7 +90,9 @@ type StartingPrompt struct {
 
 // and pass it into callOllama
 var chatHistory map[string][]Message
+
 const MaxHistory = 10
+
 var sp = StartingPrompt{}
 
 // read txt file
@@ -82,6 +113,88 @@ func (s *StartingPrompt) readPersonality() error {
 	}
 
 	return nil
+}
+
+func defineTools() []Tools {
+	var tools []Tools
+
+	tools = append(tools, Tools{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "read_file",
+			Description: "Reads the content of a file from the server's filesystem. Use this function to access files that the bot has permission to read. The argument should be the file path as a string.",
+			Parameters: ToolParameters{
+				Type: "object",
+				Properties: ToolProperties{
+					"file_path": map[string]interface{}{
+						"type":        "string",
+						"description": "The path to the file to be read. Ensure that the file is within the allowed directories and that the bot has permission to access it.",
+					},
+				},
+				Required: []string{"file_path"},
+			},
+		},
+	})
+
+	tools = append(tools, Tools{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "run_shell",
+			Description: "Executes a shell command on the server. Use this function to run commands that the bot has permission to execute. The argument should be the command as a string.",
+			Parameters: ToolParameters{
+				Type: "object",
+				Properties: ToolProperties{
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "The shell command to execute. Ensure that the command is in the following, git, ls, df, free, cat, cd, and more. And that the bot has permission to execute it.",
+					},
+				},
+				Required: []string{"command"},
+			},
+		},
+	})
+
+	tools = append(tools, Tools{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "remember",
+			Description: "Stores a piece of information in the bot's long-term memory. Use this function to save important details that the bot should remember across sessions. The argument should be a key-value pair, where the key is a string identifier and the value is the information to be stored.",
+			Parameters: ToolParameters{
+				Type: "object",
+				Properties: ToolProperties{
+					"key": map[string]interface{}{
+						"type":        "string",
+						"description": "The identifier for the information being stored. This should be a unique string that describes the information.",
+					},
+					"value": map[string]interface{}{
+						"type":        "string",
+						"description": "The information to be stored in memory. This can be any string data that the bot should remember.",
+					},
+				},
+				Required: []string{"key", "value"},
+			},
+		},
+	})
+
+	tools = append(tools, Tools{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "recall",
+			Description: "Retrieves a piece of information from the bot's long-term memory. Use this function to access details that the bot has previously stored. The argument should be the key as a string, and the function will return the corresponding value.",
+			Parameters: ToolParameters{
+				Type: "object",
+				Properties: ToolProperties{
+					"key": map[string]interface{}{
+						"type":        "string",
+						"description": "The identifier for the information being retrieved. This should match the key used when the information was stored.",
+					},
+				},
+				Required: []string{"key"},
+			},
+		},
+	})
+
+	return tools
 }
 
 // Discord Bridge
@@ -182,6 +295,111 @@ func insertSystemPrompt(ch []Message) []Message {
 	return ch
 }
 
+func processToolCall(name string, args map[string]interface{}) Message {
+	switch name {
+		case "read_file":
+			filepath, ok := args["file_path"].(string)
+			if !ok {
+				fmt.Println("Invalid arguments for read_file:", args)
+				return Message{
+					Role:    "tool",
+					Content: "Invalid arguments for read_file",
+				}
+			}
+
+			allowedPaths := strings.Split(AppConfig.AllowedPaths, ",")
+			allowed := false
+			for _, p := range allowedPaths {
+				if !strings.HasPrefix(filepath, "/home/aeron/projects") {
+					filepath = "/home/aeron/projects/" + filepath
+				}
+				
+				if strings.HasPrefix(filepath, p) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				fmt.Println("Access denied for file path:", filepath)
+				return Message{
+					Role:    "tool",
+					Content: "Access denied: file path is not allowed",
+				}
+			}
+
+			content, err := os.ReadFile(filepath)
+			if err != nil {
+				return Message{
+					Role:    "tool",
+					Content: fmt.Sprintf("Error reading file: %v", err),
+				}
+			}
+
+			result := string(content)
+			if len(result) > 500 {
+				result = result[:500] + "... (truncated)"
+			}
+			
+			return Message{
+				Role:    "tool",
+				Content: string(result),
+			}
+		case "run_shell":
+			command, ok := args["command"].(string)
+			if !ok {
+				fmt.Println("Invalid arguments for run_shell:", args)
+				return Message{
+					Role:    "tool",
+					Content: "Invalid arguments for run_shell",
+				}
+			}
+
+			allowedCommands := strings.Split(AppConfig.AllowedCommands, ",")
+			allowed := false
+			for _, cmd := range allowedCommands {
+				if strings.HasPrefix(command, cmd) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				fmt.Println("Access denied for command:", command)
+				return Message{
+					Role:    "tool",
+					Content: "Access denied: command is not allowed",
+				}
+			}
+
+			commandParts := strings.Fields(command)
+			cmd := commandParts[0]
+			cmdArgs := commandParts[1:]
+
+			output, err := exec.Command(cmd, cmdArgs...).CombinedOutput()
+			if err != nil {
+				fmt.Println("Error executing command:", err)
+				return Message{
+					Role:    "tool",
+					Content: fmt.Sprintf("Error executing command: %v", err),
+				}
+			}
+
+			result := string(output)
+			if len(result) > 500 {
+				result = result[:500] + "... (truncated)"
+			}
+			
+			return Message{
+				Role:    "tool",
+				Content: result,
+			}
+	}
+	
+	return Message{
+		Role:    "tool",
+		Content: fmt.Sprintf("Executed tool %s with args %v", name, args),
+	}
+}
+
 // Calling the LLM
 func callOllama(prompt string, channelID string) (string, error) {
 	fmt.Println("Calling model, with prompt:", prompt)
@@ -192,7 +410,7 @@ func callOllama(prompt string, channelID string) (string, error) {
 	})
 
 	if len(chatHistory[channelID]) > MaxHistory {
-		chatHistory[channelID] = chatHistory[channelID][len(chatHistory)-MaxHistory:]
+		chatHistory[channelID] = chatHistory[channelID][len(chatHistory[channelID])-MaxHistory:]
 	}
 
 	fmt.Printf("History length: %d\n", len(chatHistory[channelID]))
@@ -200,37 +418,58 @@ func callOllama(prompt string, channelID string) (string, error) {
 		fmt.Printf("[%s]: %s\n", msg.Role, msg.Content[:min(50, len(msg.Content))])
 	}
 
-	reqBody := OllamaChatRequest{
-		Model:     AppConfig.ModelVersion,
-		Messages:  insertSystemPrompt(chatHistory[channelID]),
-		Stream:    false,
-		KeepAlive: "30m",
+	var response string
+	for i := 0; i < 5; i++ {
+		reqBody := OllamaChatRequest{
+			Model:     AppConfig.ModelVersion,
+			Messages:  insertSystemPrompt(chatHistory[channelID]),
+			Stream:    false,
+			KeepAlive: "30m",
+			Tools:     defineTools(),
+		}
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return "", err
+		}
+
+		resp, err := http.Post(AppConfig.OllamaURL, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return "", err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("ollama returned status: %s", resp.Status)
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var ollamaResponse OllamaChatResponse
+		err = json.Unmarshal(body, &ollamaResponse)
+		if err != nil {
+			return "", err
+		}
+
+		if ollamaResponse.Message.Content != "" && len(ollamaResponse.Message.ToolCalls) == 0 {
+			response = ollamaResponse.Message.Content
+			break
+		}
+
+		if ollamaResponse.Message.Content == "" && len(ollamaResponse.Message.ToolCalls) > 0 &&
+			ollamaResponse.Message.ToolCalls[0].Function.Name != "" {
+			for _, toolCall := range ollamaResponse.Message.ToolCalls {
+				fmt.Println("Processing tool call:", toolCall.Function.Name, "with args:", toolCall.Function.Arguments)
+				result := processToolCall(toolCall.Function.Name, toolCall.Function.Arguments)
+
+				chatHistory[channelID] = append(chatHistory[channelID], result)
+
+				if len(chatHistory[channelID]) > MaxHistory {
+					chatHistory[channelID] = chatHistory[channelID][len(chatHistory[channelID])-MaxHistory:]
+				}
+			}
+		}
 	}
 
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := http.Post(AppConfig.OllamaURL, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama returned status: %s", resp.Status)
-	}
-
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var ollamaResponse OllamaChatResponse
-	err = json.Unmarshal(body, &ollamaResponse)
-	if err != nil {
-		return "", err
-	}
-
-	return ollamaResponse.Message.Content, nil
+	return response, nil
 }
 
 func main() {
