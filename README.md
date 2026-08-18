@@ -1,10 +1,20 @@
-### A bridge for an AI model to Discord (Bots)
+### Discord Bot powered by a LLM
+
+### Main Use Case
+- Mainly running locally and communicated via Discord.
 
 #### Current
-- Using qwen2.5:3b on a potato laptop on a baremetal home Linux server.
-- Implementing recall and remember tooling with sqlite
+- Logging.
+- Implementing recall and remember tooling with sqlite.
+- Project structure.
 
-#### Future
+#### Future (not in order)
 - Will migrate to a cloud hosted LLM dure to performance limitation on home server.
 - RAG
-
+- Context within the channel
+- Non-mention intents
+- Image recognition
+- Search tool
+- Remote access thru Tailscale
+- Some automation stuff
+- GOAL: access everything from homelab
