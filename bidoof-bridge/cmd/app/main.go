@@ -35,9 +35,7 @@ func init() {
 
 	AppConfig.OllamaURL = os.Getenv("OLLAMA_URL")
 	AppConfig.DiscordBotToken = os.Getenv("DISCORD_BOT_TOKEN")
-	AppConfig.SearxngURL = os.Getenv("SEARXNG_BASE_URL")
 	AppConfig.ModelVersion = os.Getenv("MODEL_VERSION")
-	// comma separated
 	AppConfig.AllowedPaths = os.Getenv("ALLOWED_PATHS")
 	AppConfig.AllowedCommands = os.Getenv("ALLOWED_COMMANDS")
 }
